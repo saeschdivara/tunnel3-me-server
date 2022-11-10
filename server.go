@@ -66,7 +66,7 @@ func main() {
 
 		go openNewServerHandler(newPort, newWebsocketPort)
 
-		ctx.JSON(consts.StatusOK, utils.H{"ping": newWebsocketPort})
+		ctx.JSON(consts.StatusOK, utils.H{"result": newWebsocketPort})
 	})
 
 	h.GET("/delete-host/:id", func(c context.Context, ctx *app.RequestContext) {
