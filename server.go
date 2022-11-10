@@ -163,6 +163,8 @@ func openWebSocketServer(requestChannel <-chan RequestInfo, responseChannel chan
 		server.WithHostPorts("0.0.0.0:" + port),
 	)
 
+	// TODO: handle no client element connected when receiving requests
+
 	h.GET("/", func(c context.Context, ctx *app.RequestContext) {
 		err := upgrader.Upgrade(ctx, func(conn *websocket.Conn) {
 			for {
