@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"github.com/cloudwego/hertz/pkg/common/json"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/cloudwego/hertz/pkg/common/hlog"
 	"github.com/cloudwego/hertz/pkg/common/utils"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/hertz-contrib/websocket"
@@ -18,6 +21,20 @@ import (
 var upgrader = websocket.HertzUpgrader{} // use default options
 
 func main() {
+	// setup logging file
+	f, err := os.OpenFile("app.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("error opening file: %v", err)
+	}
+	defer f.Close()
+
+	wrt := io.MultiWriter(os.Stdout, f)
+
+	log.SetOutput(wrt)
+	hlog.DefaultLogger().SetOutput(wrt)
+	hlog.SystemLogger().SetOutput(wrt)
+
+	// web app
 	h := server.Default()
 
 	nextReversePort := 5000
