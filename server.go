@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
@@ -21,43 +22,49 @@ import (
 var upgrader = websocket.HertzUpgrader{} // use default options
 
 func main() {
-	// setup logging file
-	httpLogFile, err := os.OpenFile("http.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-	if err != nil {
-		log.Fatalf("error opening http file: %v", err)
+	argsWithoutProg := os.Args[1:]
+
+	if len(argsWithoutProg) != 3 {
+		hlog.Fatal("Missing parameters [base-domain] [web-app-port-start] [web-socket-port-start]")
 	}
+
+	baseDomain := argsWithoutProg[0] // example: .tunnel3.me
+
+	// setup logging file
+	httpLogFile := setupLoggerWithFileOutput("http.log", hlog.SystemLogger())
 	defer httpLogFile.Close()
 
-	appLogFile, err := os.OpenFile("app.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-	if err != nil {
-		log.Fatalf("error opening app file: %v", err)
-	}
+	appLogFile := setupLoggerWithFileOutput("app.log", hlog.DefaultLogger())
 	defer appLogFile.Close()
-
-	httpWrt := io.MultiWriter(os.Stdout, httpLogFile)
-	appWrt := io.MultiWriter(os.Stdout, appLogFile)
-
-	log.SetOutput(appWrt)
-
-	defaultLogger := hlog.DefaultLogger()
-	defaultLogger.SetOutput(appWrt)
-	hlog.SystemLogger().SetOutput(httpWrt)
 
 	// web app
 	h := server.Default()
 
-	nextReversePort := 5000
-	nextWebsocketPort := 10000
+	webAppPortArg := argsWithoutProg[1]
+	nextReversePort, err := strconv.Atoi(webAppPortArg)
+
+	if err != nil {
+		hlog.Fatal("Could not convert web-app-port (", webAppPortArg, ") to int")
+	}
+
+	webSocketPortArg := argsWithoutProg[2]
+	nextWebsocketPort, err := strconv.Atoi(webSocketPortArg)
+
+	if err != nil {
+		hlog.Fatal("Could not convert web-socket-port (", webSocketPortArg, ") to int")
+	}
 
 	h.GET("/create-host/:id", func(c context.Context, ctx *app.RequestContext) {
+
 		tunnelId := ctx.Param("id")
+		hlog.Info("Create host: ", tunnelId)
 
 		if tunnelId == "config" {
 			ctx.AbortWithMsg("Disallowed to create this host", 401)
 			return
 		}
 
-		host := tunnelId + ".tunnel3.me"
+		host := tunnelId + baseDomain
 
 		deleteHost(tunnelId)
 
@@ -83,7 +90,9 @@ func main() {
 		resp, err := http.Post("http://127.0.0.1:2019/config/apps/http/servers/srv0/routes", "application/json", bytes.NewBuffer([]byte(values)))
 
 		if err != nil {
-			defaultLogger.Fatal(err)
+			hlog.Warn(err)
+			ctx.JSON(consts.StatusBadGateway, utils.H{"error": err})
+			return
 		}
 
 		var res map[string]interface{}
@@ -97,6 +106,7 @@ func main() {
 
 	h.GET("/delete-host/:id", func(c context.Context, ctx *app.RequestContext) {
 		hostId := ctx.Param("id")
+		hlog.Info("Delete host: ", hostId)
 
 		if hostId == "config" {
 			ctx.AbortWithMsg("Disallowed to delete this host", 401)
@@ -115,7 +125,8 @@ func deleteHost(hostId string) map[string]interface{} {
 	resp, err := http.DefaultClient.Do(req)
 
 	if err != nil {
-		hlog.DefaultLogger().Fatal(err)
+		hlog.Warn(err)
+		return nil
 	}
 
 	var res map[string]interface{}
@@ -157,19 +168,27 @@ func openNewServerHandler(port string, websocketPort string) {
 	responseChannel := make(chan ResponseInfo)
 
 	h.Any("/*path", func(c context.Context, ctx *app.RequestContext) {
+		method := string(ctx.Method())
+		uri := ctx.URI()
+
+		t1 := time.Now()
+		hlog.Info("Request > ", method, "[", uri.String(), "]")
 
 		body, _ := ctx.Body()
 
 		requestChannel <- RequestInfo{
-			Method:  string(ctx.Method()),
+			Method:  method,
 			Body:    string(body),
 			Headers: ctx.GetRequest().Header.RawHeaders(),
-			Path:    string(ctx.URI().RequestURI()),
+			Path:    string(uri.RequestURI()),
 		}
 
 		responseData := <-responseChannel
+		t2 := time.Now()
 
 		ctx.Response.SetStatusCode(responseData.StatusCode)
+
+		hlog.Info("Response > ", method, "[", uri.String(), "] ", responseData.StatusCode, " - ", t2.Sub(t1).String())
 
 		for key, values := range responseData.Headers {
 			for _, value := range values {
@@ -195,26 +214,50 @@ func openWebSocketServer(requestChannel <-chan RequestInfo, responseChannel chan
 		err := upgrader.Upgrade(ctx, func(conn *websocket.Conn) {
 			for {
 				request := <-requestChannel
+				hlog.Info("Receive request <", port, ">")
 
-				conn.WriteMessage(websocket.TextMessage, []byte(request.ToString()))
+				err := conn.WriteMessage(websocket.TextMessage, []byte(request.ToString()))
+				if err != nil {
+					hlog.Warn("Error received onMessageSent<", port, ">: ", err)
+					continue
+				}
+
+				hlog.Info("Message sent <", port, ">")
 
 				_, responseMessage, err := conn.ReadMessage()
 				if err != nil {
-					hlog.DefaultLogger().Warn("read:", err)
-					break
+					hlog.Warn("Error received onMessageReceive<", port, ">: ", err)
+					continue
 				}
+
+				hlog.Info("Message received <", port, ">")
 
 				response := ResponseInfo{}
 				json.Unmarshal(responseMessage, &response)
 
 				responseChannel <- response
+
+				hlog.Info("Response received <", port, ">")
 			}
 		})
+
 		if err != nil {
-			hlog.DefaultLogger().Warn("upgrade:", err)
+			hlog.Warn("upgrade:", err)
 			return
 		}
 	})
 
 	h.Spin()
+}
+
+func setupLoggerWithFileOutput(logFilename string, logger hlog.FullLogger) *os.File {
+	loggingFile, err := os.OpenFile(logFilename, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("error opening %s file: %v", logFilename, err)
+	}
+
+	wrt := io.MultiWriter(os.Stdout, loggingFile)
+	logger.SetOutput(wrt) // default logger
+
+	return loggingFile
 }
