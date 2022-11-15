@@ -24,8 +24,8 @@ var upgrader = websocket.HertzUpgrader{} // use default options
 func main() {
 	argsWithoutProg := os.Args[1:]
 
-	if len(argsWithoutProg) != 3 {
-		hlog.Fatal("Missing parameters [base-domain] [web-app-port-start] [web-socket-port-start]")
+	if len(argsWithoutProg) != 4 {
+		hlog.Fatal("Missing parameters [base-domain] [server-port] [web-app-port-start] [web-socket-port-start]")
 	}
 
 	baseDomain := argsWithoutProg[0] // example: .tunnel3.me
@@ -37,17 +37,26 @@ func main() {
 	appLogFile := setupLoggerWithFileOutput("app.log", hlog.DefaultLogger())
 	defer appLogFile.Close()
 
-	// web app
-	h := server.Default()
+	serverPortArg := argsWithoutProg[1]
+	_, err := strconv.Atoi(serverPortArg)
 
-	webAppPortArg := argsWithoutProg[1]
+	if err != nil {
+		hlog.Fatal("Could not convert server-port (", serverPortArg, ") to int")
+	}
+
+	// web app
+	h := server.Default(
+		server.WithHostPorts("127.0.0.1:" + serverPortArg),
+	)
+
+	webAppPortArg := argsWithoutProg[2]
 	nextReversePort, err := strconv.Atoi(webAppPortArg)
 
 	if err != nil {
 		hlog.Fatal("Could not convert web-app-port (", webAppPortArg, ") to int")
 	}
 
-	webSocketPortArg := argsWithoutProg[2]
+	webSocketPortArg := argsWithoutProg[3]
 	nextWebsocketPort, err := strconv.Atoi(webSocketPortArg)
 
 	if err != nil {
