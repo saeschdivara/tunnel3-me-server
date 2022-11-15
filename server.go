@@ -22,17 +22,26 @@ var upgrader = websocket.HertzUpgrader{} // use default options
 
 func main() {
 	// setup logging file
-	f, err := os.OpenFile("app.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	httpLogFile, err := os.OpenFile("http.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
 	if err != nil {
-		log.Fatalf("error opening file: %v", err)
+		log.Fatalf("error opening http file: %v", err)
 	}
-	defer f.Close()
+	defer httpLogFile.Close()
 
-	wrt := io.MultiWriter(os.Stdout, f)
+	appLogFile, err := os.OpenFile("app.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("error opening app file: %v", err)
+	}
+	defer appLogFile.Close()
 
-	log.SetOutput(wrt)
-	hlog.DefaultLogger().SetOutput(wrt)
-	hlog.SystemLogger().SetOutput(wrt)
+	httpWrt := io.MultiWriter(os.Stdout, httpLogFile)
+	appWrt := io.MultiWriter(os.Stdout, appLogFile)
+
+	log.SetOutput(appWrt)
+
+	defaultLogger := hlog.DefaultLogger()
+	defaultLogger.SetOutput(appWrt)
+	hlog.SystemLogger().SetOutput(httpWrt)
 
 	// web app
 	h := server.Default()
@@ -74,7 +83,7 @@ func main() {
 		resp, err := http.Post("http://127.0.0.1:2019/config/apps/http/servers/srv0/routes", "application/json", bytes.NewBuffer([]byte(values)))
 
 		if err != nil {
-			log.Fatal(err)
+			defaultLogger.Fatal(err)
 		}
 
 		var res map[string]interface{}
@@ -106,7 +115,7 @@ func deleteHost(hostId string) map[string]interface{} {
 	resp, err := http.DefaultClient.Do(req)
 
 	if err != nil {
-		log.Fatal(err)
+		hlog.DefaultLogger().Fatal(err)
 	}
 
 	var res map[string]interface{}
@@ -191,7 +200,7 @@ func openWebSocketServer(requestChannel <-chan RequestInfo, responseChannel chan
 
 				_, responseMessage, err := conn.ReadMessage()
 				if err != nil {
-					log.Println("read:", err)
+					hlog.DefaultLogger().Warn("read:", err)
 					break
 				}
 
@@ -202,7 +211,7 @@ func openWebSocketServer(requestChannel <-chan RequestInfo, responseChannel chan
 			}
 		})
 		if err != nil {
-			log.Print("upgrade:", err)
+			hlog.DefaultLogger().Warn("upgrade:", err)
 			return
 		}
 	})
