@@ -177,6 +177,7 @@ func openNewServerHandler(port string, websocketPort string) {
 
 	requestChannel := make(chan RequestInfo)
 	responseChannel := make(chan ResponseInfo)
+	serverUnavailableChannel := make(chan bool)
 
 	h.Any("/*path", func(c context.Context, ctx *app.RequestContext) {
 		userAgent := string(ctx.Request.Header.UserAgent())
@@ -201,27 +202,40 @@ func openNewServerHandler(port string, websocketPort string) {
 			Path:    string(uri.RequestURI()),
 		}
 
-		responseData := <-responseChannel
-		t2 := time.Now()
+		select {
+		case responseData := <-responseChannel:
+			t2 := time.Now()
 
-		ctx.Response.SetStatusCode(responseData.StatusCode)
+			ctx.Response.SetStatusCode(responseData.StatusCode)
 
-		hlog.Info("Response > ", method, "[", uri.String(), "] ", responseData.StatusCode, " - ", t2.Sub(t1).String())
+			hlog.Info("Response > ", method, "[", uri.String(), "] ", responseData.StatusCode, " - ", t2.Sub(t1).String())
 
-		for key, values := range responseData.Headers {
-			for _, value := range values {
-				ctx.Response.Header.Add(key, value)
+			for key, values := range responseData.Headers {
+				for _, value := range values {
+					ctx.Response.Header.Add(key, value)
+				}
+			}
+			ctx.Response.SetBodyRaw([]byte(responseData.Body))
+
+		case available := <-serverUnavailableChannel:
+			if !available {
+				t2 := time.Now()
+
+				hlog.Info("Unavailable > ", method, "[", uri.String(), "] 500 - ", t2.Sub(t1).String())
+
+				ctx.Response.SetStatusCode(502)
+				ctx.Header("Content-Type", "text/html; charset=utf-8")
+				ctx.Response.SetBodyRaw([]byte("<html><body>Server unavailable</body></html>"))
 			}
 		}
-		ctx.Response.SetBodyRaw([]byte(responseData.Body))
 	})
 
-	go openWebSocketServer(requestChannel, responseChannel, websocketPort)
+	go openWebSocketServer(requestChannel, responseChannel, serverUnavailableChannel, websocketPort)
 
 	h.Spin()
 }
 
-func openWebSocketServer(requestChannel <-chan RequestInfo, responseChannel chan<- ResponseInfo, port string) {
+func openWebSocketServer(requestChannel <-chan RequestInfo, responseChannel chan<- ResponseInfo, serverUnavailableChannel chan<- bool, port string) {
 	h := server.Default(
 		server.WithHostPorts("0.0.0.0:" + port),
 	)
@@ -236,7 +250,7 @@ func openWebSocketServer(requestChannel <-chan RequestInfo, responseChannel chan
 
 				err := conn.WriteMessage(websocket.TextMessage, []byte(request.ToString()))
 				if err != nil {
-					hlog.Warn("Error received onMessageSent<", port, ">: ", err)
+					serverUnavailableChannel <- false
 					continue
 				}
 
@@ -244,7 +258,7 @@ func openWebSocketServer(requestChannel <-chan RequestInfo, responseChannel chan
 
 				_, responseMessage, err := conn.ReadMessage()
 				if err != nil {
-					hlog.Warn("Error received onMessageReceive<", port, ">: ", err)
+					serverUnavailableChannel <- false
 					continue
 				}
 
