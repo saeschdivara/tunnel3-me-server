@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -50,21 +51,22 @@ func main() {
 	)
 
 	webAppPortArg := argsWithoutProg[2]
-	nextReversePort, err := strconv.Atoi(webAppPortArg)
+	var nextReversePort uint64
+	nextReversePort, err = strconv.ParseUint(webAppPortArg, 10, 32)
 
 	if err != nil {
 		hlog.Fatal("Could not convert web-app-port (", webAppPortArg, ") to int")
 	}
 
 	webSocketPortArg := argsWithoutProg[3]
-	nextWebsocketPort, err := strconv.Atoi(webSocketPortArg)
+	var nextWebsocketPort uint64
+	nextWebsocketPort, err = strconv.ParseUint(webSocketPortArg, 10, 32)
 
 	if err != nil {
 		hlog.Fatal("Could not convert web-socket-port (", webSocketPortArg, ") to int")
 	}
 
 	h.GET("/create-host/:id", func(c context.Context, ctx *app.RequestContext) {
-
 		tunnelId := ctx.Param("id")
 		hlog.Info("Create host: ", tunnelId)
 
@@ -77,11 +79,11 @@ func main() {
 
 		deleteHost(tunnelId)
 
-		newPort := strconv.Itoa(nextReversePort)
-		nextReversePort += 1
+		newPort := strconv.FormatUint(nextReversePort, 10)
+		atomic.AddUint64(&nextReversePort, 1)
 
-		newWebsocketPort := strconv.Itoa(nextWebsocketPort)
-		nextWebsocketPort += 1
+		newWebsocketPort := strconv.FormatUint(nextWebsocketPort, 10)
+		atomic.AddUint64(&nextWebsocketPort, 1)
 
 		values := `{
 			"@id": "` + tunnelId + `",
@@ -177,6 +179,13 @@ func openNewServerHandler(port string, websocketPort string) {
 	responseChannel := make(chan ResponseInfo)
 
 	h.Any("/*path", func(c context.Context, ctx *app.RequestContext) {
+		userAgent := string(ctx.Request.Header.UserAgent())
+
+		if userAgent == "python-requests/2.22.0" {
+			ctx.AbortWithMsg("Ok", 200)
+			return
+		}
+
 		method := string(ctx.Method())
 		uri := ctx.URI()
 
