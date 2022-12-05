@@ -35,14 +35,99 @@ func (info RequestInfo) ToString() string {
 	return string(jsonData)
 }
 
+type TunnelingServer struct {
+	requestChannel           chan RequestInfo
+	responseChannel          chan ResponseInfo
+	serverUnavailableChannel chan bool
+}
+
+func MakeTunnelingServer() *TunnelingServer {
+	srv := &TunnelingServer{
+		requestChannel:           make(chan RequestInfo),
+		responseChannel:          make(chan ResponseInfo),
+		serverUnavailableChannel: make(chan bool),
+	}
+
+	return srv
+}
+
+func (srv *TunnelingServer) TunnelRequest(ctx *app.RequestContext) {
+	method := string(ctx.Method())
+	uri := ctx.URI()
+
+	t1 := time.Now()
+	hlog.Info("Request > ", method, "[", uri.String(), "]")
+
+	body, _ := ctx.Body()
+
+	srv.requestChannel <- RequestInfo{
+		Method:  method,
+		Body:    string(body),
+		Headers: ctx.GetRequest().Header.RawHeaders(),
+		Path:    string(uri.RequestURI()),
+	}
+
+	select {
+	case responseData := <-srv.responseChannel:
+		t2 := time.Now()
+
+		ctx.Response.SetStatusCode(responseData.StatusCode)
+
+		hlog.Info("Response > ", method, "[", uri.String(), "] ", responseData.StatusCode, " - ", t2.Sub(t1).String())
+
+		for key, values := range responseData.Headers {
+			for _, value := range values {
+				ctx.Response.Header.Add(key, value)
+			}
+		}
+		ctx.Response.SetBodyRaw([]byte(responseData.Body))
+
+	case available := <-srv.serverUnavailableChannel:
+		if !available {
+			t2 := time.Now()
+
+			hlog.Info("Unavailable > ", method, "[", uri.String(), "] 500 - ", t2.Sub(t1).String())
+
+			ctx.Response.SetStatusCode(502)
+			ctx.Header("Content-Type", "text/html; charset=utf-8")
+			ctx.Response.SetBodyRaw([]byte("<html><body>Server unavailable</body></html>"))
+		}
+	}
+}
+
+func (srv *TunnelingServer) ForwardRequest(conn *websocket.Conn, port string) {
+	request := <-srv.requestChannel
+	hlog.Info("Receive request <", port, ">")
+
+	err := conn.WriteMessage(websocket.TextMessage, []byte(request.ToString()))
+	if err != nil {
+		srv.serverUnavailableChannel <- false
+		return
+	}
+
+	hlog.Info("Message sent <", port, ">")
+
+	_, responseMessage, err := conn.ReadMessage()
+	if err != nil {
+		srv.serverUnavailableChannel <- false
+		return
+	}
+
+	hlog.Info("Message received <", port, ">")
+
+	response := ResponseInfo{}
+	json.Unmarshal(responseMessage, &response)
+
+	srv.responseChannel <- response
+	hlog.Info("Response received <", port, ">")
+}
+
 func OpenNewServerHandler(port string, websocketPort string) {
 	h := server.Default(
 		server.WithHostPorts("127.0.0.1:" + port),
 	)
 
-	requestChannel := make(chan RequestInfo)
-	responseChannel := make(chan ResponseInfo)
-	serverUnavailableChannel := make(chan bool)
+	srv := MakeTunnelingServer()
 
 	h.Any("/*path", func(c context.Context, ctx *app.RequestContext) {
 		userAgent := string(ctx.Request.Header.UserAgent())
@@ -52,55 +137,19 @@ func OpenNewServerHandler(port string, websocketPort string) {
 			return
 		}
 
-		method := string(ctx.Method())
-		uri := ctx.URI()
+		k := func(conn *websocket.Conn) {}
 
-		t1 := time.Now()
-		hlog.Info("Request > ", method, "[", uri.String(), "]")
-
-		body, _ := ctx.Body()
-
-		requestChannel <- RequestInfo{
-			Method:  method,
-			Body:    string(body),
-			Headers: ctx.GetRequest().Header.RawHeaders(),
-			Path:    string(uri.RequestURI()),
-		}
-
-		select {
-		case responseData := <-responseChannel:
-			t2 := time.Now()
-
-			ctx.Response.SetStatusCode(responseData.StatusCode)
-
-			hlog.Info("Response > ", method, "[", uri.String(), "] ", responseData.StatusCode, " - ", t2.Sub(t1).String())
-
-			for key, values := range responseData.Headers {
-				for _, value := range values {
-					ctx.Response.Header.Add(key, value)
-				}
-			}
-			ctx.Response.SetBodyRaw([]byte(responseData.Body))
-
-		case available := <-serverUnavailableChannel:
-			if !available {
-				t2 := time.Now()
-
-				hlog.Info("Unavailable > ", method, "[", uri.String(), "] 500 - ", t2.Sub(t1).String())
-
-				ctx.Response.SetStatusCode(502)
-				ctx.Header("Content-Type", "text/html; charset=utf-8")
-				ctx.Response.SetBodyRaw([]byte("<html><body>Server unavailable</body></html>"))
-			}
+		if err := upgrader.Upgrade(ctx, k); err != nil {
+			srv.TunnelRequest(ctx)
 		}
 	})
 
-	go openWebSocketServer(requestChannel, responseChannel, serverUnavailableChannel, websocketPort)
+	go openWebSocketServer(srv, websocketPort)
 
 	h.Spin()
 }
 
-func openWebSocketServer(requestChannel <-chan RequestInfo, responseChannel chan<- ResponseInfo, serverUnavailableChannel chan<- bool, port string) {
+func openWebSocketServer(srv *TunnelingServer, port string) {
 	h := server.Default(
 		server.WithHostPorts("0.0.0.0:" + port),
 	)
@@ -110,31 +159,7 @@ func openWebSocketServer(requestChannel <-chan RequestInfo, responseChannel chan
 	h.GET("/", func(c context.Context, ctx *app.RequestContext) {
 		err := upgrader.Upgrade(ctx, func(conn *websocket.Conn) {
 			for {
-				request := <-requestChannel
-				hlog.Info("Receive request <", port, ">")
-
-				err := conn.WriteMessage(websocket.TextMessage, []byte(request.ToString()))
-				if err != nil {
-					serverUnavailableChannel <- false
-					continue
-				}
-
-				hlog.Info("Message sent <", port, ">")
-
-				_, responseMessage, err := conn.ReadMessage()
-				if err != nil {
-					serverUnavailableChannel <- false
-					continue
-				}
-
-				hlog.Info("Message received <", port, ">")
-
-				response := ResponseInfo{}
-				json.Unmarshal(responseMessage, &response)
-
-				responseChannel <- response
-
-				hlog.Info("Response received <", port, ">")
+				srv.ForwardRequest(conn, port)
 			}
 		})
 

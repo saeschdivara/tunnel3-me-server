@@ -99,14 +99,14 @@ func main() {
 	h.Spin()
 }
 
-func registerHost(tunnelId string, baseDomain string, nextReversePort *uint64, nextWebsocketPort *uint64) (err error, newPort string, newWebsocketPort string) {
+func registerHost(tunnelId string, baseDomain string, nextReversePort *uint64, nextWebsocketPort *uint64) (error, string, string) {
 	host := tunnelId + baseDomain
 	deleteHost(tunnelId)
 
-	newPort = strconv.FormatUint(*nextReversePort, 10)
+	newPort := strconv.FormatUint(*nextReversePort, 10)
 	atomic.AddUint64(nextReversePort, 1)
 
-	newWebsocketPort = strconv.FormatUint(*nextWebsocketPort, 10)
+	newWebsocketPort := strconv.FormatUint(*nextWebsocketPort, 10)
 	atomic.AddUint64(nextWebsocketPort, 1)
 
 	values := `{
@@ -122,8 +122,8 @@ func registerHost(tunnelId string, baseDomain string, nextReversePort *uint64, n
 			}]
 		}`
 
-	_, err = http.Post("http://127.0.0.1:2019/config/apps/http/servers/srv0/routes", "application/json", bytes.NewBuffer([]byte(values)))
-	return err, "", ""
+	_, err := http.Post("http://127.0.0.1:2019/config/apps/http/servers/srv0/routes", "application/json", bytes.NewBuffer([]byte(values)))
+	return err, newPort, newWebsocketPort
 }
 
 func deleteHost(hostId string) map[string]interface{} {
