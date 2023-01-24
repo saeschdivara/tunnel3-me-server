@@ -78,7 +78,7 @@ func main() {
 			return
 		}
 
-		go tunnels.OpenNewServerHandler(newPort, newWebsocketPort)
+		go tunnels.OpenNewServerHandler(baseDomain, newPort, newWebsocketPort)
 
 		ctx.JSON(consts.StatusOK, utils.H{"result": newWebsocketPort})
 	})
@@ -100,7 +100,7 @@ func main() {
 }
 
 func registerHost(tunnelId string, baseDomain string, nextReversePort *uint64, nextWebsocketPort *uint64) (error, string, string) {
-	host := tunnelId + baseDomain
+	host := tunnelId + "." + baseDomain
 	deleteHost(tunnelId)
 
 	newPort := strconv.FormatUint(*nextReversePort, 10)
