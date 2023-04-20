@@ -37,6 +37,12 @@ func main() {
 		// Enable printing of SDK debug messages.
 		// Useful when getting started or trying to figure something out.
 		Debug: true,
+
+		// performance monitoring: https://docs.sentry.io/platforms/go/performance/
+		EnableTracing: true,
+		// Specify a fixed sample rate:
+		// We recommend adjusting this value in production
+		TracesSampleRate: 1.0,
 	})
 	if err != nil {
 		log.Fatalf("sentry.Init: %s", err)
