@@ -3,8 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/cloudwego/hertz/pkg/common/hlog"
 	"github.com/cloudwego/hertz/pkg/common/json"
+	"github.com/cloudwego/hertz/pkg/common/utils"
+	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/getsentry/sentry-go"
+	"github.com/hertz-contrib/hertzsentry"
+	"github.com/hertz-contrib/websocket"
 	"io"
 	"log"
 	"net/http"
@@ -12,13 +19,6 @@ import (
 	"strconv"
 	"sync/atomic"
 	"time"
-
-	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/hlog"
-	"github.com/cloudwego/hertz/pkg/common/utils"
-	"github.com/cloudwego/hertz/pkg/protocol/consts"
-	"github.com/hertz-contrib/websocket"
 )
 
 var upgrader = websocket.HertzUpgrader{} // use default options
@@ -45,7 +45,7 @@ func main() {
 		TracesSampleRate: 1.0,
 	})
 	if err != nil {
-		log.Fatalf("sentry.Init: %s", err)
+		log.Fatalf("sentry_hertz.Init: %s", err)
 	}
 	// Flush buffered events before the program terminates.
 	// Set the timeout to the maximum duration the program can afford to wait.
@@ -69,6 +69,11 @@ func main() {
 	h := server.Default(
 		server.WithHostPorts("127.0.0.1:" + serverPortArg),
 	)
+
+	h.Use(hertzsentry.NewSentry(
+		hertzsentry.WithSendRequest(true),
+		hertzsentry.WithRePanic(true),
+	))
 
 	webAppPortArg := argsWithoutProg[2]
 	var nextReversePort uint64
@@ -195,6 +200,11 @@ func openNewServerHandler(port string, websocketPort string) {
 		server.WithHostPorts("127.0.0.1:" + port),
 	)
 
+	h.Use(hertzsentry.NewSentry(
+		hertzsentry.WithSendRequest(true),
+		hertzsentry.WithRePanic(true),
+	))
+
 	requestChannel := make(chan RequestInfo)
 	responseChannel := make(chan ResponseInfo)
 	serverUnavailableChannel := make(chan bool)
@@ -259,6 +269,11 @@ func openWebSocketServer(requestChannel <-chan RequestInfo, responseChannel chan
 	h := server.Default(
 		server.WithHostPorts("0.0.0.0:" + port),
 	)
+
+	h.Use(hertzsentry.NewSentry(
+		hertzsentry.WithSendRequest(true),
+		hertzsentry.WithRePanic(true),
+	))
 
 	// TODO: handle no client element connected when receiving requests
 
