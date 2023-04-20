@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"github.com/cloudwego/hertz/pkg/common/json"
+	"github.com/getsentry/sentry-go"
 	"io"
 	"log"
 	"net/http"
@@ -31,6 +32,19 @@ func main() {
 
 	baseDomain := argsWithoutProg[0] // example: .tunnel3.me
 
+	err := sentry.Init(sentry.ClientOptions{
+		Dsn: "https://6962e24b976c45e8b2ebcce01cd23095@o372537.ingest.sentry.io/4505045778694144",
+		// Enable printing of SDK debug messages.
+		// Useful when getting started or trying to figure something out.
+		Debug: true,
+	})
+	if err != nil {
+		log.Fatalf("sentry.Init: %s", err)
+	}
+	// Flush buffered events before the program terminates.
+	// Set the timeout to the maximum duration the program can afford to wait.
+	defer sentry.Flush(2 * time.Second)
+
 	// setup logging file
 	httpLogFile := setupLoggerWithFileOutput("http.log", hlog.SystemLogger())
 	defer httpLogFile.Close()
@@ -39,7 +53,7 @@ func main() {
 	defer appLogFile.Close()
 
 	serverPortArg := argsWithoutProg[1]
-	_, err := strconv.Atoi(serverPortArg)
+	_, err = strconv.Atoi(serverPortArg)
 
 	if err != nil {
 		hlog.Fatal("Could not convert server-port (", serverPortArg, ") to int")
