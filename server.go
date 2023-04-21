@@ -33,7 +33,7 @@ func main() {
 	baseDomain := argsWithoutProg[0] // example: .tunnel3.me
 
 	err := sentry.Init(sentry.ClientOptions{
-		Dsn: "https://6962e24b976c45e8b2ebcce01cd23095@o372537.ingest.sentry.io/4505045778694144",
+		Dsn: os.Getenv("SENTRY_DSN"),
 		// Enable printing of SDK debug messages.
 		// Useful when getting started or trying to figure something out.
 		Debug: true,
@@ -52,9 +52,11 @@ func main() {
 	defer sentry.Flush(2 * time.Second)
 
 	// setup logging file
+	hlog.SystemLogger().SetLevel(hlog.LevelInfo)
 	httpLogFile := setupLoggerWithFileOutput("http.log", hlog.SystemLogger())
 	defer httpLogFile.Close()
 
+	hlog.DefaultLogger().SetLevel(hlog.LevelInfo)
 	appLogFile := setupLoggerWithFileOutput("app.log", hlog.DefaultLogger())
 	defer appLogFile.Close()
 
@@ -92,6 +94,9 @@ func main() {
 	}
 
 	h.GET("/create-host/:id", func(c context.Context, ctx *app.RequestContext) {
+		span := sentry.StartSpan(c, "base/create-host")
+		defer span.Finish()
+
 		tunnelId := ctx.Param("id")
 		hlog.Info("Create host: ", tunnelId)
 
@@ -141,6 +146,8 @@ func main() {
 	})
 
 	h.GET("/delete-host/:id", func(c context.Context, ctx *app.RequestContext) {
+		span := sentry.StartSpan(c, "base/delete-host")
+		defer span.Finish()
 		hostId := ctx.Param("id")
 		hlog.Info("Delete host: ", hostId)
 
@@ -210,6 +217,8 @@ func openNewServerHandler(port string, websocketPort string) {
 	serverUnavailableChannel := make(chan bool)
 
 	h.Any("/*path", func(c context.Context, ctx *app.RequestContext) {
+		span := sentry.StartSpan(c, "custom/path")
+		defer span.Finish()
 		userAgent := string(ctx.Request.Header.UserAgent())
 
 		if userAgent == "python-requests/2.22.0" {
@@ -221,7 +230,7 @@ func openNewServerHandler(port string, websocketPort string) {
 		uri := ctx.URI()
 
 		t1 := time.Now()
-		hlog.Info("Request > ", method, "[", uri.String(), "]")
+		hlog.Debug("Request > ", method, "[", uri.String(), "]")
 
 		body, _ := ctx.Body()
 
@@ -281,30 +290,27 @@ func openWebSocketServer(requestChannel <-chan RequestInfo, responseChannel chan
 		err := upgrader.Upgrade(ctx, func(conn *websocket.Conn) {
 			for {
 				request := <-requestChannel
-				hlog.Info("Receive request <", port, ">")
+				span := sentry.StartSpan(c, "websocket/request")
 
 				err := conn.WriteMessage(websocket.TextMessage, []byte(request.ToString()))
 				if err != nil {
 					serverUnavailableChannel <- false
+					span.Finish()
 					continue
 				}
-
-				hlog.Info("Message sent <", port, ">")
 
 				_, responseMessage, err := conn.ReadMessage()
 				if err != nil {
 					serverUnavailableChannel <- false
+					span.Finish()
 					continue
 				}
-
-				hlog.Info("Message received <", port, ">")
 
 				response := ResponseInfo{}
 				json.Unmarshal(responseMessage, &response)
 
 				responseChannel <- response
-
-				hlog.Info("Response received <", port, ">")
+				span.Finish()
 			}
 		})
 
