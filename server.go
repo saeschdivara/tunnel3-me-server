@@ -3,7 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/cloudwego/hertz/pkg/common/hlog"
 	"github.com/cloudwego/hertz/pkg/common/json"
+	"github.com/cloudwego/hertz/pkg/common/utils"
+	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/getsentry/sentry-go"
+	"github.com/hertz-contrib/hertzsentry"
+	"github.com/hertz-contrib/websocket"
 	"io"
 	"log"
 	"net/http"
@@ -11,13 +19,6 @@ import (
 	"strconv"
 	"sync/atomic"
 	"time"
-
-	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/hlog"
-	"github.com/cloudwego/hertz/pkg/common/utils"
-	"github.com/cloudwego/hertz/pkg/protocol/consts"
-	"github.com/hertz-contrib/websocket"
 )
 
 var upgrader = websocket.HertzUpgrader{} // use default options
@@ -31,15 +32,36 @@ func main() {
 
 	baseDomain := argsWithoutProg[0] // example: .tunnel3.me
 
+	err := sentry.Init(sentry.ClientOptions{
+		Dsn: os.Getenv("SENTRY_DSN"),
+		// Enable printing of SDK debug messages.
+		// Useful when getting started or trying to figure something out.
+		Debug: true,
+
+		// performance monitoring: https://docs.sentry.io/platforms/go/performance/
+		EnableTracing: true,
+		// Specify a fixed sample rate:
+		// We recommend adjusting this value in production
+		TracesSampleRate: 0.2,
+	})
+	if err != nil {
+		log.Fatalf("sentry_hertz.Init: %s", err)
+	}
+	// Flush buffered events before the program terminates.
+	// Set the timeout to the maximum duration the program can afford to wait.
+	defer sentry.Flush(2 * time.Second)
+
 	// setup logging file
+	hlog.SystemLogger().SetLevel(hlog.LevelInfo)
 	httpLogFile := setupLoggerWithFileOutput("http.log", hlog.SystemLogger())
 	defer httpLogFile.Close()
 
+	hlog.DefaultLogger().SetLevel(hlog.LevelInfo)
 	appLogFile := setupLoggerWithFileOutput("app.log", hlog.DefaultLogger())
 	defer appLogFile.Close()
 
 	serverPortArg := argsWithoutProg[1]
-	_, err := strconv.Atoi(serverPortArg)
+	_, err = strconv.Atoi(serverPortArg)
 
 	if err != nil {
 		hlog.Fatal("Could not convert server-port (", serverPortArg, ") to int")
@@ -49,6 +71,11 @@ func main() {
 	h := server.Default(
 		server.WithHostPorts("127.0.0.1:" + serverPortArg),
 	)
+
+	h.Use(hertzsentry.NewSentry(
+		hertzsentry.WithSendRequest(true),
+		hertzsentry.WithRePanic(true),
+	))
 
 	webAppPortArg := argsWithoutProg[2]
 	var nextReversePort uint64
@@ -67,6 +94,9 @@ func main() {
 	}
 
 	h.GET("/create-host/:id", func(c context.Context, ctx *app.RequestContext) {
+		span := sentry.StartSpan(c, "base/create-host", sentry.TransactionName("Create Host"))
+		defer span.Finish()
+
 		tunnelId := ctx.Param("id")
 		hlog.Info("Create host: ", tunnelId)
 
@@ -77,7 +107,9 @@ func main() {
 
 		host := tunnelId + baseDomain
 
+		deleteSpan := sentry.StartSpan(span.Context(), "delete-host")
 		deleteHost(tunnelId)
+		deleteSpan.Finish()
 
 		newPort := strconv.FormatUint(nextReversePort, 10)
 		atomic.AddUint64(&nextReversePort, 1)
@@ -98,7 +130,9 @@ func main() {
 			}]
 		}`
 
+		newHostSpan := sentry.StartSpan(span.Context(), "post-new-host")
 		resp, err := http.Post("http://127.0.0.1:2019/config/apps/http/servers/srv0/routes", "application/json", bytes.NewBuffer([]byte(values)))
+		newHostSpan.Finish()
 
 		if err != nil {
 			hlog.Warn(err)
@@ -116,6 +150,8 @@ func main() {
 	})
 
 	h.GET("/delete-host/:id", func(c context.Context, ctx *app.RequestContext) {
+		span := sentry.StartSpan(c, "base/delete-host", sentry.TransactionName("Create Host"))
+		defer span.Finish()
 		hostId := ctx.Param("id")
 		hlog.Info("Delete host: ", hostId)
 
@@ -152,6 +188,7 @@ type RequestInfo struct {
 	Body    string
 	Headers []byte
 	Path    string
+	Span    *sentry.Span
 }
 
 type ResponseInfo struct {
@@ -175,11 +212,18 @@ func openNewServerHandler(port string, websocketPort string) {
 		server.WithHostPorts("127.0.0.1:" + port),
 	)
 
+	h.Use(hertzsentry.NewSentry(
+		hertzsentry.WithSendRequest(true),
+		hertzsentry.WithRePanic(true),
+	))
+
 	requestChannel := make(chan RequestInfo)
 	responseChannel := make(chan ResponseInfo)
 	serverUnavailableChannel := make(chan bool)
 
 	h.Any("/*path", func(c context.Context, ctx *app.RequestContext) {
+		span := sentry.StartSpan(c, "custom/path", sentry.TransactionName("Http Request"))
+		defer span.Finish()
 		userAgent := string(ctx.Request.Header.UserAgent())
 
 		if userAgent == "python-requests/2.22.0" {
@@ -191,11 +235,13 @@ func openNewServerHandler(port string, websocketPort string) {
 		uri := ctx.URI()
 
 		t1 := time.Now()
-		hlog.Info("Request > ", method, "[", uri.String(), "]")
+		hlog.Debug("Request > ", method, "[", uri.String(), "]")
 
 		body, _ := ctx.Body()
 
+		reqSpan := sentry.StartSpan(span.Context(), "go-req-forward")
 		requestChannel <- RequestInfo{
+			Span:    span,
 			Method:  method,
 			Body:    string(body),
 			Headers: ctx.GetRequest().Header.RawHeaders(),
@@ -205,6 +251,7 @@ func openNewServerHandler(port string, websocketPort string) {
 		select {
 		case responseData := <-responseChannel:
 			t2 := time.Now()
+			reqSpan.Finish()
 
 			ctx.Response.SetStatusCode(responseData.StatusCode)
 
@@ -220,6 +267,7 @@ func openNewServerHandler(port string, websocketPort string) {
 		case available := <-serverUnavailableChannel:
 			if !available {
 				t2 := time.Now()
+				reqSpan.Finish()
 
 				hlog.Info("Unavailable > ", method, "[", uri.String(), "] 500 - ", t2.Sub(t1).String())
 
@@ -240,36 +288,40 @@ func openWebSocketServer(requestChannel <-chan RequestInfo, responseChannel chan
 		server.WithHostPorts("0.0.0.0:" + port),
 	)
 
+	h.Use(hertzsentry.NewSentry(
+		hertzsentry.WithSendRequest(true),
+		hertzsentry.WithRePanic(true),
+	))
+
 	// TODO: handle no client element connected when receiving requests
 
 	h.GET("/", func(c context.Context, ctx *app.RequestContext) {
 		err := upgrader.Upgrade(ctx, func(conn *websocket.Conn) {
 			for {
 				request := <-requestChannel
-				hlog.Info("Receive request <", port, ">")
 
+				sendSpan := sentry.StartSpan(request.Span.Context(), "websocket/request/send")
 				err := conn.WriteMessage(websocket.TextMessage, []byte(request.ToString()))
+				sendSpan.Finish()
+
 				if err != nil {
 					serverUnavailableChannel <- false
 					continue
 				}
 
-				hlog.Info("Message sent <", port, ">")
-
+				receiveSpan := sentry.StartSpan(request.Span.Context(), "websocket/request/send")
 				_, responseMessage, err := conn.ReadMessage()
+				receiveSpan.Finish()
+
 				if err != nil {
 					serverUnavailableChannel <- false
 					continue
 				}
-
-				hlog.Info("Message received <", port, ">")
 
 				response := ResponseInfo{}
 				json.Unmarshal(responseMessage, &response)
 
 				responseChannel <- response
-
-				hlog.Info("Response received <", port, ">")
 			}
 		})
 
