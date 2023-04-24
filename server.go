@@ -42,7 +42,7 @@ func main() {
 		EnableTracing: true,
 		// Specify a fixed sample rate:
 		// We recommend adjusting this value in production
-		TracesSampleRate: 1.0,
+		TracesSampleRate: 0.2,
 	})
 	if err != nil {
 		log.Fatalf("sentry_hertz.Init: %s", err)
@@ -94,7 +94,7 @@ func main() {
 	}
 
 	h.GET("/create-host/:id", func(c context.Context, ctx *app.RequestContext) {
-		span := sentry.StartSpan(c, "base/create-host")
+		span := sentry.StartSpan(c, "base/create-host", sentry.TransactionName("Create Host"))
 		defer span.Finish()
 
 		tunnelId := ctx.Param("id")
@@ -107,7 +107,9 @@ func main() {
 
 		host := tunnelId + baseDomain
 
+		deleteSpan := sentry.StartSpan(span.Context(), "delete-host")
 		deleteHost(tunnelId)
+		deleteSpan.Finish()
 
 		newPort := strconv.FormatUint(nextReversePort, 10)
 		atomic.AddUint64(&nextReversePort, 1)
@@ -128,7 +130,9 @@ func main() {
 			}]
 		}`
 
+		newHostSpan := sentry.StartSpan(span.Context(), "post-new-host")
 		resp, err := http.Post("http://127.0.0.1:2019/config/apps/http/servers/srv0/routes", "application/json", bytes.NewBuffer([]byte(values)))
+		newHostSpan.Finish()
 
 		if err != nil {
 			hlog.Warn(err)
@@ -146,7 +150,7 @@ func main() {
 	})
 
 	h.GET("/delete-host/:id", func(c context.Context, ctx *app.RequestContext) {
-		span := sentry.StartSpan(c, "base/delete-host")
+		span := sentry.StartSpan(c, "base/delete-host", sentry.TransactionName("Create Host"))
 		defer span.Finish()
 		hostId := ctx.Param("id")
 		hlog.Info("Delete host: ", hostId)
@@ -184,6 +188,7 @@ type RequestInfo struct {
 	Body    string
 	Headers []byte
 	Path    string
+	Span    *sentry.Span
 }
 
 type ResponseInfo struct {
@@ -217,7 +222,7 @@ func openNewServerHandler(port string, websocketPort string) {
 	serverUnavailableChannel := make(chan bool)
 
 	h.Any("/*path", func(c context.Context, ctx *app.RequestContext) {
-		span := sentry.StartSpan(c, "custom/path")
+		span := sentry.StartSpan(c, "custom/path", sentry.TransactionName("Http Request"))
 		defer span.Finish()
 		userAgent := string(ctx.Request.Header.UserAgent())
 
@@ -234,7 +239,9 @@ func openNewServerHandler(port string, websocketPort string) {
 
 		body, _ := ctx.Body()
 
+		reqSpan := sentry.StartSpan(span.Context(), "go-req-forward")
 		requestChannel <- RequestInfo{
+			Span:    span,
 			Method:  method,
 			Body:    string(body),
 			Headers: ctx.GetRequest().Header.RawHeaders(),
@@ -244,6 +251,7 @@ func openNewServerHandler(port string, websocketPort string) {
 		select {
 		case responseData := <-responseChannel:
 			t2 := time.Now()
+			reqSpan.Finish()
 
 			ctx.Response.SetStatusCode(responseData.StatusCode)
 
@@ -259,6 +267,7 @@ func openNewServerHandler(port string, websocketPort string) {
 		case available := <-serverUnavailableChannel:
 			if !available {
 				t2 := time.Now()
+				reqSpan.Finish()
 
 				hlog.Info("Unavailable > ", method, "[", uri.String(), "] 500 - ", t2.Sub(t1).String())
 
@@ -290,19 +299,22 @@ func openWebSocketServer(requestChannel <-chan RequestInfo, responseChannel chan
 		err := upgrader.Upgrade(ctx, func(conn *websocket.Conn) {
 			for {
 				request := <-requestChannel
-				span := sentry.StartSpan(c, "websocket/request")
 
+				sendSpan := sentry.StartSpan(request.Span.Context(), "websocket/request/send")
 				err := conn.WriteMessage(websocket.TextMessage, []byte(request.ToString()))
+				sendSpan.Finish()
+
 				if err != nil {
 					serverUnavailableChannel <- false
-					span.Finish()
 					continue
 				}
 
+				receiveSpan := sentry.StartSpan(request.Span.Context(), "websocket/request/send")
 				_, responseMessage, err := conn.ReadMessage()
+				receiveSpan.Finish()
+
 				if err != nil {
 					serverUnavailableChannel <- false
-					span.Finish()
 					continue
 				}
 
@@ -310,7 +322,6 @@ func openWebSocketServer(requestChannel <-chan RequestInfo, responseChannel chan
 				json.Unmarshal(responseMessage, &response)
 
 				responseChannel <- response
-				span.Finish()
 			}
 		})
 
